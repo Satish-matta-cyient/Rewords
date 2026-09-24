@@ -5,6 +5,7 @@
   "description": "EduRewards — Ambassador Rewards & Referral Platform",
   "workspaces": ["backend", "frontend"],
   "scripts": {
+    "postinstall": "npm --workspace backend run prisma:generate",
     "setup": "npm install && npm run backend:setup",
     "backend:setup": "npm --workspace backend run setup",
     "dev": "concurrently -n api,web -c green,cyan \"npm:dev:backend\" \"npm:dev:frontend\"",
