@@ -1,4 +1,4 @@
-import type { HTMLAttributes, ReactNode } from 'react';
+import type { CSSProperties, HTMLAttributes, ReactNode } from 'react';
 
 interface CardProps extends HTMLAttributes<HTMLDivElement> {
   interactive?: boolean;
@@ -24,8 +24,8 @@ export function CardHeader({ title, subtitle, action }: { title: ReactNode; subt
   );
 }
 
-export function CardBody({ children, className = '' }: { children: ReactNode; className?: string }) {
-  return <div className={`card__body ${className}`.trim()}>{children}</div>;
+export function CardBody({ children, className = '', style }: { children: ReactNode; className?: string; style?: CSSProperties }) {
+  return <div className={`card__body ${className}`.trim()} style={style}>{children}</div>;
 }
 
 export function CardFooter({ children }: { children: ReactNode }) {

@@ -44,7 +44,7 @@ const TITLES: { match: RegExp; title: string; subtitle?: string }[] = [
 ];
 
 function resolveTitle(pathname: string) {
-  return TITLES.find((t) => t.match.test(pathname)) ?? { title: 'EduRewards' };
+  return TITLES.find((t) => t.match.test(pathname)) ?? { title: 'EduRewards', subtitle: undefined };
 }
 
 function OfflineBanner() {
