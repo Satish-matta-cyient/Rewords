@@ -86,7 +86,7 @@ export const settingsService = {
     const economics = Object.entries(KEY_MAP).reduce((acc, [field, key]) => {
       const raw = byKey.get(key);
       const fallback = DEFAULTS[field as keyof Economics];
-      (acc as Record<string, unknown>)[field] = raw === undefined ? fallback : parseValue(raw, fallback);
+      (acc as unknown as Record<string, unknown>)[field] = raw === undefined ? fallback : parseValue(raw, fallback);
       return acc;
     }, {} as Economics);
 

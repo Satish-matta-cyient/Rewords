@@ -41,7 +41,7 @@ export const notificationRepository = {
   upsertPreferences(userId: string, data: Prisma.NotificationPreferenceUncheckedUpdateInput) {
     return prisma.notificationPreference.upsert({
       where: { userId },
-      create: { userId, ...(data as Prisma.NotificationPreferenceUncheckedCreateInput) },
+      create: { ...(data as Prisma.NotificationPreferenceUncheckedCreateInput), userId },
       update: data,
     });
   },

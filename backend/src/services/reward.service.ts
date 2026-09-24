@@ -67,7 +67,7 @@ export const rewardService = {
     const category = await prisma.rewardCategory.findUnique({ where: { key: input.categoryKey } });
     if (!category) throw new NotFoundError('Reward category');
     const { categoryKey, ...rest } = input;
-    const reward = await rewardRepository.create({ ...(rest as never), categoryId: category.id });
+    const reward = await rewardRepository.create({ ...(rest as Record<string, unknown>), categoryId: category.id } as never);
     await auditService.record({ ...ctx, action: 'reward.created', entityType: 'Reward', entityId: reward.id, after: reward });
     return reward;
   },
@@ -82,7 +82,7 @@ export const rewardService = {
       if (!category) throw new NotFoundError('Reward category');
       categoryId = category.id;
     }
-    const updated = await rewardRepository.update(id, { ...(rest as never), ...(categoryId ? { categoryId } : {}) });
+    const updated = await rewardRepository.update(id, { ...(rest as Record<string, unknown>), ...(categoryId ? { categoryId } : {}) } as never);
     await auditService.record({ ...ctx, action: 'reward.updated', entityType: 'Reward', entityId: id, before, after: updated });
     return updated;
   },
