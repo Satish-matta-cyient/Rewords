@@ -1,0 +1,35 @@
+node_modules/
+dist/
+build/
+.vite/
+
+# Environment — never commit real secrets
+.env
+.env.*
+!.env.example
+
+# SQLite database and its journals
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+backend/data/
+!backend/data/.gitkeep
+
+# Uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Logs and OS noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+coverage/
+.nyc_output/

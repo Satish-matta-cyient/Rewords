@@ -1,0 +1,977 @@
+// EduRewards — Ambassador Rewards & Referral Platform
+// Prisma schema (SQLite)
+//
+// Design notes:
+//  - PointsLedger is the append-only source of truth for all point movement.
+//  - Wallet holds derived/materialised balances, only ever written by PointsService
+//    inside a transaction that also appends ledger rows.
+//  - ReferralClosure is a closure table enabling O(1)-ish ancestor/descendant queries.
+//  - Every sensitive mutation writes an immutable AuditLog row.
+//  - SQLite has no native enum support, so enums are modelled as constrained strings.
+//    The canonical values live in `shared/constants` and are validated by Zod.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id                String    @id @default(uuid())
+  email             String    @unique
+  phone             String?   @unique
+  passwordHash      String
+  fullName          String
+  status            String    @default("PENDING_VERIFICATION") // PENDING_VERIFICATION | ACTIVE | SUSPENDED | DEACTIVATED
+  primaryRole       String    @default("USER") // USER | ADMIN | SUPER_ADMIN
+  emailVerifiedAt   DateTime?
+  lastLoginAt       DateTime?
+  failedLoginCount  Int       @default(0)
+  lockedUntil       DateTime?
+  institutionId     String?
+  riskScore         Int       @default(0)
+  deletedAt         DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  institution       Institution?       @relation(fields: [institutionId], references: [id])
+  profile           Profile?
+  roles             UserRole[]
+  refreshTokens     RefreshToken[]
+  authTokens        AuthToken[]
+  termsAcceptances  TermsAcceptance[]
+  referralCodes     ReferralCode[]
+  referralAsChild   ReferralRelation?  @relation("ChildRelation")
+  referralAsParent  ReferralRelation[] @relation("ParentRelation")
+  ancestorsOf       ReferralClosure[]  @relation("Ancestor")
+  descendantsOf     ReferralClosure[]  @relation("Descendant")
+  submissions       PostSubmission[]
+  reviews           PostReview[]
+  wallet            Wallet?
+  ledgerEntries     PointsLedger[]
+  redemptions       Redemption[]
+  payoutProfile     PayoutProfile?
+  kycRecords        KycRecord[]
+  payoutRequests    PayoutRequest[]
+  notifications     Notification[]
+  notificationPref  NotificationPreference?
+  auditLogs         AuditLog[]
+  riskFlags         RiskFlag[]         @relation("FlaggedUser")
+  riskEvents        RiskEvent[]
+  leaderboardRows   LeaderboardEntry[]
+  badges            UserBadge[]
+  tier              UserTier?
+  streak            Streak?
+  tickets           SupportTicket[]
+  ticketMessages    SupportMessage[]
+  announcements     Announcement[]     @relation("AnnouncementAuthor")
+  campaignsCreated  Campaign[]         @relation("CampaignCreator")
+  assignedTickets   SupportTicket[]    @relation("TicketAssignee")
+  institutionLinks  InstitutionUser[]
+
+  @@index([status])
+  @@index([primaryRole])
+  @@index([institutionId])
+  @@index([createdAt])
+}
+
+model Profile {
+  id            String    @id @default(uuid())
+  userId        String    @unique
+  avatarUrl     String?
+  bio           String?
+  college       String?
+  course        String?
+  graduationYear Int?
+  city          String?
+  state         String?
+  country       String?   @default("IN")
+  interests     String?   // JSON array of strings
+  onboardedAt   DateTime?
+  onboardingStep Int      @default(0)
+  publicOnLeaderboard Boolean @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  key         String           @unique // USER | ADMIN | SUPER_ADMIN
+  name        String
+  description String?
+  createdAt   DateTime         @default(now())
+
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  key         String           @unique // e.g. submissions:approve
+  description String?
+
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model UserRole {
+  userId     String
+  roleId     String
+  grantedBy  String?
+  grantedAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@index([roleId])
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  tokenHash  String    @unique
+  family     String
+  userAgent  String?
+  ip         String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  createdAt  DateTime  @default(now())
+
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([family])
+}
+
+// Email verification + password reset tokens (hashed, single use, expiring)
+model AuthToken {
+  id        String    @id @default(uuid())
+  userId    String
+  type      String    // EMAIL_VERIFICATION | PASSWORD_RESET
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+}
+
+model TermsAcceptance {
+  id         String   @id @default(uuid())
+  userId     String
+  version    String
+  ip         String?
+  userAgent  String?
+  acceptedAt DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, version])
+}
+
+// ---------------------------------------------------------------------------
+// Referral engine
+// ---------------------------------------------------------------------------
+
+model ReferralCode {
+  id        String   @id @default(uuid())
+  userId    String
+  code      String   @unique
+  active    Boolean  @default(true)
+  clicks    Int      @default(0)
+  signups   Int      @default(0)
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Direct parent -> child edge. A user can have at most one parent (immutable once set).
+model ReferralRelation {
+  id           String   @id @default(uuid())
+  childId      String   @unique
+  parentId     String
+  codeUsed     String
+  earningsPaused Boolean @default(false)
+  createdAt    DateTime @default(now())
+
+  child        User     @relation("ChildRelation", fields: [childId], references: [id], onDelete: Cascade)
+  parent       User     @relation("ParentRelation", fields: [parentId], references: [id], onDelete: Cascade)
+
+  @@index([parentId])
+}
+
+/// Closure table: one row per (ancestor, descendant) pair including self at depth 0.
+model ReferralClosure {
+  id           String   @id @default(uuid())
+  ancestorId   String
+  descendantId String
+  depth        Int
+  createdAt    DateTime @default(now())
+
+  ancestor     User     @relation("Ancestor", fields: [ancestorId], references: [id], onDelete: Cascade)
+  descendant   User     @relation("Descendant", fields: [descendantId], references: [id], onDelete: Cascade)
+
+  @@unique([ancestorId, descendantId])
+  @@index([descendantId, depth])
+  @@index([ancestorId, depth])
+}
+
+// ---------------------------------------------------------------------------
+// Campaigns
+// ---------------------------------------------------------------------------
+
+model Campaign {
+  id                  String   @id @default(uuid())
+  name                String
+  slug                String   @unique
+  description         String
+  product             String?
+  category            String   @default("GENERAL")
+  creditValue         Int      // points awarded per approved submission
+  startDate           DateTime
+  endDate             DateTime
+  status              String   @default("DRAFT") // DRAFT|SCHEDULED|ACTIVE|PAUSED|COMPLETED|ARCHIVED
+  budgetPoints        Int?     // total point budget
+  budgetSpentPoints   Int      @default(0)
+  perUserLimit        Int      @default(1)
+  captionTemplate     String?
+  hashtags            String?  // JSON array
+  brandGuidelines     String?
+  coverImageUrl       String?
+  institutionId       String?
+  createdById         String?
+  deletedAt           DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  institution         Institution?      @relation(fields: [institutionId], references: [id])
+  createdBy           User?             @relation("CampaignCreator", fields: [createdById], references: [id])
+  rules               CampaignRule[]
+  creatives           CampaignCreative[]
+  platforms           CampaignPlatform[]
+  submissions         PostSubmission[]
+
+  @@index([status, endDate])
+  @@index([institutionId])
+}
+
+model CampaignRule {
+  id         String   @id @default(uuid())
+  campaignId String
+  label      String
+  detail     String
+  mandatory  Boolean  @default(true)
+  sortOrder  Int      @default(0)
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+}
+
+model CampaignCreative {
+  id         String   @id @default(uuid())
+  campaignId String
+  type       String   // IMAGE | VIDEO | LOGO | DOCUMENT
+  title      String
+  fileUrl    String
+  fileSize   Int?
+  mimeType   String?
+  downloads  Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+}
+
+model CampaignPlatform {
+  id         String   @id @default(uuid())
+  campaignId String
+  platform   String   // INSTAGRAM|FACEBOOK|LINKEDIN|X|YOUTUBE|TELEGRAM
+  multiplier Float    @default(1)
+
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, platform])
+}
+
+// ---------------------------------------------------------------------------
+// Submissions & verification
+// ---------------------------------------------------------------------------
+
+model PostSubmission {
+  id              String    @id @default(uuid())
+  userId          String
+  campaignId      String
+  platform        String
+  postUrl         String
+  normalisedUrl   String
+  caption         String?
+  notes           String?
+  status          String    @default("PENDING") // DRAFT|PENDING|UNDER_REVIEW|INFO_REQUESTED|APPROVED|REJECTED|REVERSED|EXPIRED
+  awardedPoints   Int       @default(0)
+  riskLevel       String    @default("LOW") // LOW|MEDIUM|HIGH
+  submittedAt     DateTime  @default(now())
+  reviewedAt      DateTime?
+  reviewedById    String?
+  lastLivenessAt  DateTime?
+  livenessFailures Int      @default(0)
+  resubmissionOf  String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  campaign        Campaign    @relation(fields: [campaignId], references: [id])
+  media           PostMedia[]
+  reviews         PostReview[]
+
+  @@unique([normalisedUrl])
+  @@index([status, submittedAt])
+  @@index([userId, status])
+  @@index([campaignId, status])
+  @@index([reviewedById])
+}
+
+model PostMedia {
+  id           String   @id @default(uuid())
+  submissionId String
+  type         String   @default("SCREENSHOT")
+  fileUrl      String
+  mimeType     String?
+  fileSize     Int?
+  createdAt    DateTime @default(now())
+
+  submission   PostSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+}
+
+/// Immutable record of every state transition on a submission.
+model PostReview {
+  id           String   @id @default(uuid())
+  submissionId String
+  reviewerId   String?
+  fromStatus   String
+  toStatus     String
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  submission   PostSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  reviewer     User?          @relation(fields: [reviewerId], references: [id])
+  notes        ReviewNote[]
+
+  @@index([submissionId])
+  @@index([reviewerId, createdAt])
+}
+
+model ReviewNote {
+  id        String   @id @default(uuid())
+  reviewId  String
+  body      String
+  internal  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  review    PostReview @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  @@index([reviewId])
+}
+
+// ---------------------------------------------------------------------------
+// Points, wallet, ledger
+// ---------------------------------------------------------------------------
+
+model Wallet {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  availablePoints Int     @default(0)
+  pendingPoints  Int      @default(0)
+  lockedPoints   Int      @default(0)
+  redeemedPoints Int      @default(0)
+  expiredPoints  Int      @default(0)
+  lifetimeEarned Int      @default(0)
+  version        Int      @default(0)
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// Append-only ledger. Never update or delete rows; correct with REVERSAL/ADJUSTMENT.
+model PointsLedger {
+  id             String   @id @default(uuid())
+  userId         String
+  transactionType String  // REFERRAL_BONUS|POST_REWARD|LEVEL_BONUS|MANUAL_CREDIT|MANUAL_DEBIT|REDEMPTION_LOCK|REDEMPTION_DEBIT|REVERSAL|EXPIRY|REFUND
+  points         Int      // signed: positive = credit, negative = debit
+  balanceAfter   Int
+  level          Int?     // referral level for LEVEL_BONUS / REFERRAL_BONUS
+  sourceType     String   // SUBMISSION|REDEMPTION|REFERRAL|ADMIN|SYSTEM|PAYOUT
+  sourceId       String
+  originUserId   String?  // the user whose action generated this (e.g. downline member)
+  description    String
+  reversedById   String?
+  metadata       String?  // JSON
+  expiresAt      DateTime?
+  createdAt      DateTime @default(now())
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Idempotency guarantee: one award per (user, type, source).
+  @@unique([userId, transactionType, sourceType, sourceId])
+  @@index([userId, createdAt])
+  @@index([sourceType, sourceId])
+  @@index([transactionType])
+  @@index([expiresAt])
+}
+
+/// Audit-friendly grouping of a single distribution event (one submission -> N ledger rows).
+model PointsDistribution {
+  id            String   @id @default(uuid())
+  sourceType    String
+  sourceId      String
+  triggeredById String
+  totalPoints   Int
+  levelsPaid    Int
+  breakdown     String   // JSON
+  createdAt     DateTime @default(now())
+
+  @@unique([sourceType, sourceId])
+  @@index([triggeredById])
+}
+
+model PointsAdjustment {
+  id          String   @id @default(uuid())
+  userId      String
+  adminId     String
+  points      Int
+  reason      String
+  ledgerId    String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([adminId])
+}
+
+model PointsReversal {
+  id            String   @id @default(uuid())
+  originalLedgerId String @unique
+  reversalLedgerId String @unique
+  reason        String
+  actorId       String?
+  createdAt     DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Rewards, vouchers, redemptions
+// ---------------------------------------------------------------------------
+
+model RewardCategory {
+  id        String   @id @default(uuid())
+  key       String   @unique // SHOPPING|FOOD|TRAVEL|ENTERTAINMENT|EDUCATION|CASH|OTHER
+  name      String
+  iconKey   String?
+  sortOrder Int      @default(0)
+
+  rewards   Reward[]
+}
+
+model Reward {
+  id           String   @id @default(uuid())
+  title        String
+  description  String
+  categoryId   String
+  imageUrl     String?
+  pointsCost   Int
+  cashValue    Float
+  stock        Int      @default(0)
+  badge        String?  // POPULAR | BEST_VALUE | NEW
+  terms        String?
+  deliveryType String   @default("VOUCHER_CODE") // VOUCHER_CODE|CASH_PAYOUT|PHYSICAL|MANUAL
+  active       Boolean  @default(true)
+  featured     Boolean  @default(false)
+  sortOrder    Int      @default(0)
+  lowStockThreshold Int @default(5)
+  deletedAt    DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  category     RewardCategory @relation(fields: [categoryId], references: [id])
+  voucherCodes VoucherCode[]
+  redemptions  Redemption[]
+
+  @@index([active, featured])
+  @@index([categoryId])
+}
+
+model VoucherCode {
+  id           String    @id @default(uuid())
+  rewardId     String
+  code         String
+  status       String    @default("UNUSED") // UNUSED|RESERVED|ASSIGNED|USED|EXPIRED
+  assignedToId String?
+  redemptionId String?   @unique
+  batchRef     String?
+  expiresAt    DateTime?
+  assignedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  reward       Reward    @relation(fields: [rewardId], references: [id], onDelete: Cascade)
+  redemption   Redemption? @relation(fields: [redemptionId], references: [id])
+
+  @@unique([rewardId, code])
+  @@index([rewardId, status])
+}
+
+model Redemption {
+  id             String   @id @default(uuid())
+  reference      String   @unique
+  userId         String
+  rewardId       String
+  pointsSpent    Int
+  cashValue      Float
+  status         String   @default("REQUESTED") // REQUESTED|POINTS_LOCKED|UNDER_REVIEW|APPROVED|FULFILLED|REJECTED|CANCELLED
+  rejectionReason String?
+  reviewedById   String?
+  reviewedAt     DateTime?
+  fulfilledAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reward         Reward   @relation(fields: [rewardId], references: [id])
+  items          RedemptionItem[]
+  voucher        VoucherCode?
+
+  @@index([status, createdAt])
+  @@index([userId, status])
+}
+
+model RedemptionItem {
+  id           String   @id @default(uuid())
+  redemptionId String
+  label        String
+  quantity     Int      @default(1)
+  pointsEach   Int
+
+  redemption   Redemption @relation(fields: [redemptionId], references: [id], onDelete: Cascade)
+
+  @@index([redemptionId])
+}
+
+// ---------------------------------------------------------------------------
+// Payouts & KYC
+// ---------------------------------------------------------------------------
+
+model PayoutProfile {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  method        String   @default("UPI") // UPI | BANK
+  upiId         String?
+  accountNumber String?  // stored encrypted at rest by PayoutService
+  accountLast4  String?
+  ifsc          String?
+  bankName      String?
+  accountName   String?
+  panNumber     String?  // encrypted
+  panLast4      String?
+  verified      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model KycRecord {
+  id            String    @id @default(uuid())
+  userId        String
+  documentType  String    // PAN | AADHAAR | PASSPORT
+  documentUrl   String
+  status        String    @default("SUBMITTED") // SUBMITTED|UNDER_REVIEW|VERIFIED|REJECTED
+  reviewerId    String?
+  rejectionReason String?
+  reviewedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+}
+
+model PayoutRequest {
+  id           String    @id @default(uuid())
+  reference    String    @unique
+  userId       String
+  points       Int
+  grossAmount  Float
+  tdsAmount    Float     @default(0)
+  netAmount    Float
+  status       String    @default("REQUESTED") // REQUESTED|APPROVED|PROCESSING|COMPLETED|FAILED|REJECTED
+  method       String
+  failureReason String?
+  processedAt  DateTime?
+  approvedById String?
+  utrNumber    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  type      String
+  title     String
+  body      String
+  link      String?
+  metadata  String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+model NotificationPreference {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  inApp     Boolean  @default(true)
+  email     Boolean  @default(true)
+  whatsapp  Boolean  @default(false)
+  sms       Boolean  @default(false)
+  mutedTypes String? // JSON array
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Audit, risk
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actorRole  String?
+  action     String
+  entityType String
+  entityId   String?
+  ip         String?
+  userAgent  String?
+  beforeJson String?
+  afterJson  String?
+  metadata   String?
+  createdAt  DateTime @default(now())
+
+  actor      User?    @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+model RiskFlag {
+  id         String    @id @default(uuid())
+  userId     String
+  type       String    // SELF_REFERRAL|CIRCULAR_REFERRAL|DUPLICATE_PHONE|DUPLICATE_PAN|DUPLICATE_UPI|DUPLICATE_URL|SHARED_IP|DEVICE_FINGERPRINT|HIGH_REJECTION|VELOCITY|PAYOUT_ANOMALY
+  severity   String    @default("MEDIUM") // LOW|MEDIUM|HIGH|CRITICAL
+  status     String    @default("OPEN")   // OPEN|UNDER_REVIEW|DISMISSED|ACTIONED
+  score      Int       @default(0)
+  summary    String
+  evidence   String?   // JSON
+  resolvedById String?
+  resolvedAt DateTime?
+  resolutionNote String?
+  createdAt  DateTime  @default(now())
+
+  user       User      @relation("FlaggedUser", fields: [userId], references: [id], onDelete: Cascade)
+  events     RiskEvent[]
+
+  @@index([status, severity])
+  @@index([userId])
+}
+
+model RiskEvent {
+  id        String   @id @default(uuid())
+  flagId    String?
+  userId    String
+  type      String
+  weight    Int      @default(0)
+  detail    String?
+  ip        String?
+  fingerprint String?
+  createdAt DateTime @default(now())
+
+  flag      RiskFlag? @relation(fields: [flagId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([fingerprint])
+  @@index([ip])
+}
+
+// ---------------------------------------------------------------------------
+// Gamification
+// ---------------------------------------------------------------------------
+
+model Tier {
+  id          String     @id @default(uuid())
+  key         String     @unique // BRONZE|SILVER|GOLD|PLATINUM
+  name        String
+  minPoints   Int
+  minReferrals Int       @default(0)
+  multiplier  Float      @default(1)
+  perks       String?    // JSON
+  sortOrder   Int        @default(0)
+
+  userTiers   UserTier[]
+}
+
+model UserTier {
+  id         String   @id @default(uuid())
+  userId     String   @unique
+  tierId     String
+  achievedAt DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tier       Tier     @relation(fields: [tierId], references: [id])
+
+  @@index([tierId])
+}
+
+model Badge {
+  id          String      @id @default(uuid())
+  key         String      @unique
+  name        String
+  description String
+  iconKey     String?
+  criteria    String?     // JSON
+
+  users       UserBadge[]
+}
+
+model UserBadge {
+  userId    String
+  badgeId   String
+  earnedAt  DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  @@id([userId, badgeId])
+}
+
+model Streak {
+  id           String   @id @default(uuid())
+  userId       String   @unique
+  currentDays  Int      @default(0)
+  longestDays  Int      @default(0)
+  lastActiveOn DateTime?
+  updatedAt    DateTime @updatedAt
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model LeaderboardEntry {
+  id         String   @id @default(uuid())
+  userId     String
+  period     String   // e.g. 2026-09 or ALL_TIME
+  scope      String   // POINTS|NETWORK|APPROVED_POSTS
+  rank       Int
+  value      Int
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([period, scope, userId])
+  @@index([period, scope, rank])
+}
+
+// ---------------------------------------------------------------------------
+// Support
+// ---------------------------------------------------------------------------
+
+model SupportTicket {
+  id           String   @id @default(uuid())
+  reference    String   @unique
+  userId       String
+  assigneeId   String?
+  category     String   // ACCOUNT|POINTS|REDEMPTION|CAMPAIGN|TECHNICAL|OTHER
+  subject      String
+  status       String   @default("OPEN") // OPEN|IN_PROGRESS|WAITING_FOR_USER|RESOLVED|CLOSED
+  priority     String   @default("MEDIUM") // LOW|MEDIUM|HIGH|URGENT
+  firstResponseAt DateTime?
+  resolvedAt   DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignee     User?    @relation("TicketAssignee", fields: [assigneeId], references: [id])
+  messages     SupportMessage[]
+
+  @@index([status, priority])
+  @@index([userId])
+  @@index([assigneeId])
+}
+
+model SupportMessage {
+  id         String   @id @default(uuid())
+  ticketId   String
+  authorId   String
+  body       String
+  internal   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author     User          @relation(fields: [authorId], references: [id])
+  attachments SupportAttachment[]
+
+  @@index([ticketId, createdAt])
+}
+
+model SupportAttachment {
+  id        String   @id @default(uuid())
+  messageId String
+  fileUrl   String
+  fileName  String
+  mimeType  String?
+  fileSize  Int?
+  createdAt DateTime @default(now())
+
+  message   SupportMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+// ---------------------------------------------------------------------------
+// Platform configuration
+// ---------------------------------------------------------------------------
+
+model AppSetting {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       String   // JSON-encoded
+  valueType   String   @default("NUMBER") // NUMBER|STRING|BOOLEAN|JSON
+  group       String   @default("GENERAL")
+  label       String
+  description String?
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+
+  @@index([group])
+}
+
+model FeatureFlag {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  enabled     Boolean  @default(false)
+  description String?
+  updatedAt   DateTime @updatedAt
+}
+
+model Announcement {
+  id          String   @id @default(uuid())
+  title       String
+  body        String
+  audience    String   @default("ALL") // ALL|TIER|CAMPAIGN|ACTIVE|SEGMENT
+  audienceRef String?
+  severity    String   @default("INFO") // INFO|SUCCESS|WARNING
+  publishedAt DateTime?
+  expiresAt   DateTime?
+  authorId    String?
+  createdAt   DateTime @default(now())
+
+  author      User?    @relation("AnnouncementAuthor", fields: [authorId], references: [id])
+
+  @@index([publishedAt])
+}
+
+model ScheduledReport {
+  id         String   @id @default(uuid())
+  name       String
+  reportKey  String
+  cron       String
+  recipients String   // JSON array of emails
+  format     String   @default("CSV")
+  lastRunAt  DateTime?
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Institutions (multi-org foundation)
+// ---------------------------------------------------------------------------
+
+model Institution {
+  id         String   @id @default(uuid())
+  name       String
+  slug       String   @unique
+  type       String   @default("COLLEGE") // COLLEGE|SCHOOL|ORGANIZATION
+  city       String?
+  state      String?
+  logoUrl    String?
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  users      User[]
+  campaigns  Campaign[]
+  members    InstitutionUser[]
+  admins     InstitutionAdmin[]
+}
+
+model InstitutionUser {
+  institutionId String
+  userId        String
+  joinedAt      DateTime @default(now())
+
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([institutionId, userId])
+  @@index([userId])
+}
+
+model InstitutionAdmin {
+  id            String   @id @default(uuid())
+  institutionId String
+  userId        String
+  scope         String   @default("FULL")
+  createdAt     DateTime @default(now())
+
+  institution   Institution @relation(fields: [institutionId], references: [id], onDelete: Cascade)
+
+  @@unique([institutionId, userId])
+}

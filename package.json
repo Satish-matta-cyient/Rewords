@@ -1,0 +1,28 @@
+{
+  "name": "edurewards",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EduRewards — Ambassador Rewards & Referral Platform",
+  "workspaces": ["backend", "frontend"],
+  "scripts": {
+    "setup": "npm install && npm run backend:setup",
+    "backend:setup": "npm --workspace backend run setup",
+    "dev": "concurrently -n api,web -c green,cyan \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:backend": "npm --workspace backend run dev",
+    "dev:frontend": "npm --workspace frontend run dev",
+    "build": "npm --workspace backend run build && npm --workspace frontend run build",
+    "start": "npm --workspace backend run start",
+    "test": "npm --workspace backend run test && npm --workspace frontend run test",
+    "typecheck": "npm --workspace backend run typecheck && npm --workspace frontend run typecheck",
+    "db:migrate": "npm --workspace backend run db:migrate",
+    "db:seed": "npm --workspace backend run db:seed",
+    "db:studio": "npm --workspace backend run db:studio",
+    "db:reset": "npm --workspace backend run db:reset"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
