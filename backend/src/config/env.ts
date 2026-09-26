@@ -14,6 +14,10 @@ const envSchema = z.object({
   FRONTEND_URL: z.string().url().default('http://localhost:5173'),
   COOKIE_DOMAIN: z.string().optional(),
   COOKIE_SECURE: z.coerce.boolean().default(false),
+  // 'none' is required when the frontend is served from a different site than
+  // the API — a 'lax' cookie is never sent on cross-site requests, so sessions
+  // would silently fail to refresh.
+  COOKIE_SAMESITE: z.enum(['lax', 'strict', 'none']).default('lax'),
 
   UPLOAD_DIR: z.string().default('./uploads'),
   MAX_UPLOAD_MB: z.coerce.number().default(5),
@@ -34,7 +38,14 @@ const envSchema = z.object({
   APP_VERSION: z.string().default('1.0.0'),
 });
 
-const parsed = envSchema.safeParse(process.env);
+const parsed = envSchema
+  // Browsers discard a SameSite=None cookie that is not also Secure, which
+  // would leave sign-in working but every refresh failing.
+  .refine((v) => v.COOKIE_SAMESITE !== 'none' || v.COOKIE_SECURE || v.NODE_ENV === 'production', {
+    path: ['COOKIE_SAMESITE'],
+    message: "COOKIE_SAMESITE=none requires COOKIE_SECURE=true (browsers drop the cookie otherwise)",
+  })
+  .safeParse(process.env);
 
 if (!parsed.success) {
   // Fail fast: a misconfigured environment must never boot silently.

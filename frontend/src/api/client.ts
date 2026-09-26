@@ -1,6 +1,7 @@
 import type { ApiResponse } from '@shared/types';
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1';
+// A trailing slash here is a common deployment typo and would double up in every path.
+const BASE_URL = (import.meta.env.VITE_API_URL ?? '/api/v1').replace(/\/+$/, '');
 
 export class ApiError extends Error {
   readonly code: string;
@@ -15,6 +16,18 @@ export class ApiError extends Error {
     this.code = code;
     this.details = details;
     this.requestId = requestId;
+  }
+}
+
+const OFFLINE_MESSAGE = 'Cannot reach the server. Check your internet connection and try again.';
+const UNREACHABLE_MESSAGE = 'The EduRewards service is not responding right now. Please try again in a moment.';
+
+/** A failed fetch means the request never reached the API — surface that plainly. */
+async function send(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new ApiError(OFFLINE_MESSAGE, 0, 'NETWORK_ERROR');
   }
 }
 
@@ -68,7 +81,7 @@ async function execute<T>(path: string, options: RequestOptions = {}, isRetry = 
   const { body, query, raw, headers, ...rest } = options;
   const isFormData = body instanceof FormData;
 
-  const response = await fetch(buildUrl(path, query), {
+  const response = await send(buildUrl(path, query), {
     ...rest,
     credentials: 'include',
     headers: {
@@ -94,7 +107,9 @@ async function execute<T>(path: string, options: RequestOptions = {}, isRetry = 
 
   const payload = (await response.json().catch(() => null)) as ApiResponse<T> | null;
 
-  if (!payload) throw new ApiError('The server returned an unreadable response', response.status, 'INTERNAL_ERROR');
+  // The API always answers JSON. A non-JSON body means a proxy or static host
+  // answered instead, so the request never reached the backend.
+  if (!payload) throw new ApiError(UNREACHABLE_MESSAGE, response.status, 'NETWORK_ERROR');
   if (!payload.success) {
     throw new ApiError(
       payload.error.message,
@@ -114,7 +129,7 @@ export const api = {
   put: <T>(path: string, body?: unknown, options?: RequestOptions) => execute<T>(path, { ...options, method: 'PUT', body }),
   delete: <T>(path: string, body?: unknown, options?: RequestOptions) => execute<T>(path, { ...options, method: 'DELETE', body }),
   download: async (path: string, query?: RequestOptions['query']) => {
-    const response = await fetch(buildUrl(path, query), {
+    const response = await send(buildUrl(path, query), {
       credentials: 'include',
       headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
     });

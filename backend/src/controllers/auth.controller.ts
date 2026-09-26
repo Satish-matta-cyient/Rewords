@@ -12,14 +12,21 @@ function auditCtx(req: Request) {
 
 const REFRESH_COOKIE = 'refreshToken';
 
-function setRefreshCookie(res: Response, token: string) {
-  res.cookie(REFRESH_COOKIE, token, {
+/** Set and clear must agree on every attribute, or logout leaves the cookie alive. */
+function refreshCookieOptions() {
+  return {
     httpOnly: true,
     secure: env.COOKIE_SECURE || isProd,
-    sameSite: 'lax',
+    sameSite: env.COOKIE_SAMESITE,
     path: '/api/v1/auth',
-    maxAge: env.JWT_REFRESH_TTL_DAYS * 86_400_000,
     ...(env.COOKIE_DOMAIN ? { domain: env.COOKIE_DOMAIN } : {}),
+  };
+}
+
+function setRefreshCookie(res: Response, token: string) {
+  res.cookie(REFRESH_COOKIE, token, {
+    ...refreshCookieOptions(),
+    maxAge: env.JWT_REFRESH_TTL_DAYS * 86_400_000,
   });
 }
 
@@ -50,7 +57,7 @@ export const authController = {
 
   async logout(req: Request, res: Response) {
     await authService.logout(req.cookies?.[REFRESH_COOKIE], req.auth?.userId);
-    res.clearCookie(REFRESH_COOKIE, { path: '/api/v1/auth' });
+    res.clearCookie(REFRESH_COOKIE, refreshCookieOptions());
     return ok(res, { loggedOut: true });
   },
 

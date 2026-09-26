@@ -3,7 +3,7 @@ import { useAuthStore } from '@/store/authStore';
 import { ROLE_RANK, type Role } from '@shared/constants';
 import { Skeleton } from '@/components/ui';
 
-function BootSplash() {
+export function BootSplash() {
   return (
     <div style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', padding: 24 }}>
       <div className="stack" style={{ width: 'min(420px, 100%)' }}>

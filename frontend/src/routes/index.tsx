@@ -1,8 +1,8 @@
-import { lazy } from 'react';
-import { createBrowserRouter, Navigate } from 'react-router-dom';
+import { lazy, Suspense } from 'react';
+import { createBrowserRouter, Navigate, Outlet, type RouteObject } from 'react-router-dom';
 import { AppLayout } from '@/layouts/AppLayout';
 import { AuthLayout } from '@/layouts/AuthLayout';
-import { RequireAuth, RequireRole, RedirectIfAuthenticated, HomeRedirect } from './guards';
+import { RequireAuth, RequireRole, RedirectIfAuthenticated, HomeRedirect, BootSplash } from './guards';
 import { RootErrorBoundary } from './RootErrorBoundary';
 
 // Every page is lazily loaded so the initial bundle stays small.
@@ -59,8 +59,15 @@ const PrivacyPage = lazy(() => import('@/features/legal/PrivacyPage'));
 const NotFoundPage = lazy(() => import('@/features/legal/NotFoundPage'));
 const ForbiddenPage = lazy(() => import('@/features/legal/ForbiddenPage'));
 
-export const router = createBrowserRouter([
+export const routes: RouteObject[] = [
   {
+    // Every page below is lazy. Without a boundary here, a redirect into a
+    // not-yet-downloaded chunk suspends on a sync update and crashes the tree.
+    element: (
+      <Suspense fallback={<BootSplash />}>
+        <Outlet />
+      </Suspense>
+    ),
     errorElement: <RootErrorBoundary />,
     children: [
       { path: '/', element: <HomeRedirect /> },
@@ -162,4 +169,6 @@ export const router = createBrowserRouter([
       { path: '*', element: <Navigate to="/404" replace /> },
     ],
   },
-]);
+];
+
+export const router = createBrowserRouter(routes);

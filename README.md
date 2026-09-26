@@ -227,6 +227,45 @@ npm start
 The frontend builds to `frontend/dist` (static files, deployable anywhere).
 The backend builds to `backend/dist`.
 
+### This is two deployables, not one
+
+`frontend/dist` is plain static files, but the backend is a **long-running Node
+process** and needs a host that can run one. Static-only hosting — shared or
+WordPress plans, static-site builders, CDN buckets — can serve the UI but cannot
+run the API, and every `/api/v1/...` call there answers `404`. Sign-in fails
+first, because it is the first call the app makes.
+
+Pick one of two layouts:
+
+**Same origin** — the UI and the API answer on one domain, with the host
+reverse-proxying `/api` to the Node process. Nothing extra to configure: the app
+already calls the relative path `/api/v1`.
+
+**Split hosts** — the UI on a static host, the API on a Node host:
+
+| Where | Variable | Value |
+| --- | --- | --- |
+| Frontend build | `VITE_API_URL` | `https://api.your-domain.com/api/v1` |
+| Backend | `FRONTEND_URL` | `https://your-domain.com` |
+| Backend | `COOKIE_SECURE` | `true` |
+| Backend | `COOKIE_SAMESITE` | `none` |
+
+`VITE_API_URL` is read at build time, so set it **before** building the
+frontend. `FRONTEND_URL` must match the UI's origin exactly — the API rejects
+any other origin outright.
+
+`COOKIE_SAMESITE=none` is what makes sessions survive a refresh across two
+hosts: the refresh token is a cookie, and a `lax` cookie is never sent on a
+cross-site request. Browsers additionally discard a `none` cookie that is not
+`Secure`, so **both hosts must serve HTTPS** — the API refuses to boot on a
+combination that cannot work.
+
+Set `COOKIE_DOMAIN` only when the UI and API are subdomains of one parent
+(`app.` and `api.` of `your-domain.com`); on unrelated domains, leave it unset.
+
+The static host also needs an SPA fallback — unknown paths serve `index.html` —
+or deep links like `/dashboard` 404 on refresh.
+
 ---
 
 ## Deployment with Docker
